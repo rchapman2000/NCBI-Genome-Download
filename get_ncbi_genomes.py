@@ -548,6 +548,9 @@ def main():
     # Set both to 0 by default.
     minLen = 0
     maxLen = 0
+
+    # The length variance should be set at 5% by default
+    lenVar = 0.05
     # Checks which options the user supplied. 
     if args.minLen and not args.maxLen:
         # If the user supplied a minimum length without a maximum length, notify the user and exit
@@ -573,8 +576,6 @@ def main():
         # the average sequence length. If no RefSeq exists for that organism, then the keyword
         # 'complete genome' is added to the query, and the lengths of the return sequences are averaged.
 
-        # The length variance should be set at 5% by default
-        lenVar = 0.05
         # If the user specified a length variance value using the option,
         # set that value 
         if args.lenVar:
