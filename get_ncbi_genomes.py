@@ -338,12 +338,22 @@ def checkAccession(a):
 
     # Uses regex to parse the accession number and capture the prefix
     r = re.search(accession_regex_pattern, a)
+
+    # Checks whether a match was found. In testing, some cases have arisen
+    # where protein sequences have been included (which do not have
+    # the same accession numbers as nucleotide sequences) 
+    if r:
                 
-    # Checks whether the captured prefix is found within the 
-    # list of patent sequence prefixes.
-    if r.group(1) in patent_sequence_prefixes:
-        # If yes, the accession number is not valid and should
-        # not be downloaded.
+        # If there was a match, the script then checks whether the captured prefix 
+        # is found within the list of patent sequence prefixes.
+        if r.group(1) in patent_sequence_prefixes:
+            # If yes, the accession number is not valid and should
+            # not be downloaded.
+            valid_accession = False
+    else:
+        # If no match was found, meaning that the accession number did not match
+        # a typical Nucleotide accession number, the accession number is not valid 
+        # and should not be downloaded.
         valid_accession = False
 
     # Return whether the accession number is valid.
