@@ -46,10 +46,16 @@ accession_regex_pattern = '([A-Z]{1}|[A-Z]{2})_?(\d{6}|\d{5})\.\d'
 # for the segment number (as it may be added here). THis 
 description_segment_regex_pattern = '(segment:? (\d))'
 
+# If no RefSeq sequences are returned for a given organism, the following title
+# qualifiers will be used to query Nucleotide to determine the average genome length.
+# Qualifiers will be searched in order (so first item in list will be use first) and
+# will stop if any sequences are returned for that result.
+title_search_quantifiers = ["complete genome", "complete"]
+
 # Biopython's Entrez Package sets a cap of 20 records to be obtained by default with a maximum
 # of 10,000 possible. This variable stores 10,000 to set all searches to return the maximum and avoid
 # missing samples due to this return cap.
-retmax = 10000
+retmax = 100000000
 
 
 def searchNucleotide(query):
@@ -107,6 +113,16 @@ def getSourceFeature(rec):
     # Return the source feature in dictionary format.
     return source
 
+def getFirstGeneProduct(rec):
+    """FUNCTION STILL UNDER DEVELOPMENT
+    """
+
+    product = None
+    for f in rec.features:
+        if 'product' in f.qualifiers.keys():
+            product = f.qualifiers['product'][0]
+
+    return product
 
 def getContinent(country):
     """Uses the pycountry-convert library to determine the continent from a country name.
@@ -361,9 +377,13 @@ def checkAccession(a):
 
 
 def checkCoverage(sequence, cov):
-    """Checks the sequence coverage (number of ambiguous bases (N's)
-    divided by the total sequence length) and ensures it meets a minimum
-    threshold. Returns true is the sequence passes and false is not.
+    """Checks whether the sequence is defined in NCBI and whether the sequence coverage
+    (number of ambiguous bases (N's) divided by the total sequence length) and ensures it
+    meets a minimum threshold. Returns true is the sequence passes and false is not.
+
+    As a note, the Bio.Seq object's 'defined' method is an undocumented method that I found
+    while searching the Biopython GitHub Issues (https://github.com/biopython/biopython/issues/3667). 
+    It provides a convenient way of checking whether the record contains a genome sequence or not.
 
     Parameters
     ----------
@@ -376,28 +396,34 @@ def checkCoverage(sequence, cov):
     """
 
     # Creates a boolean value to denote whether a sequence passed
-    # the coverage filter.
-    valid_coverage = True
+    # the filters.
+    valid_sequence = True
 
-    # Counts the number of N characters in a sequence using the 
-    # count() function built into python.
-    Ns = sequence.count("N")
+    # First, checks whether the sequence is defined. 
+    if sequence.defined:
+        # If so, check the coverage
+
+        # Counts the number of N characters in a sequence using the 
+        # count() function built into python.
+        Ns = sequence.count("N")
     
-    # Grabs the length of the sequence.
-    seqLen = len(sequence)
+        # Grabs the length of the sequence.
+        seqLen = len(sequence)
 
-    # Calculates percent coverage by taking the number of Ns divided by the 
-    # total length of the sequence and subtracting from 1.
-    coverage = (1 - (Ns / seqLen))
+        # Calculates percent coverage by taking the number of Ns divided by the 
+        # total length of the sequence and subtracting from 1.
+        coverage = (1 - (Ns / seqLen))
 
-    # Checks whether the sequence coverage is below the coverage threshold
-    if coverage < cov:
-        # If so, then the sequence has failed the coverage filter and
-        # the boolean is set accordingly.
-        valid_coverage = False
+        # Checks whether the sequence coverage is below the coverage threshold
+        if coverage < cov:
+            # If so, then the sequence has failed the coverage filter and
+            # the boolean is set accordingly.
+            valid_sequence = False
+    else:
+        valid_sequence = False
 
     # Return whether the sequence coverage is valid.
-    return valid_coverage
+    return valid_sequence
 
 def checkSegment(recSegment, segLengths, recLen, lenVar):
     """Checks whether a sequence of a particular segment meets the 
@@ -446,6 +472,40 @@ def checkSegment(recSegment, segLengths, recLen, lenVar):
     # Return whether the sequence passes
     return passing_segment
 
+def writeErrorSummary(outPref, date, org, errorMsg):
+    """A function that writes an error summary file in
+    a set format, but allows various different errors to be
+    passed to handle multiple error cases.
+
+    Parameters
+    ----------
+    outPref: string
+        A prefix to include in the file name in addition to 
+        "-download-summary.txt".
+
+    date: date
+        The date that NCBI was accessed to include in the summary
+        for reference by the user.
+
+    org: string
+        The organism supplied by the user that was queried.
+
+    errorMsg: string
+        The error message to be written to the file.
+    """
+    #Create a file stream to write the summary file.
+    summaryOut = open("{0}-download-summary.txt".format(outPref), "w+")
+
+    # Write data to the summary file including the date NCBI was accessed,
+    # the organism, the genome length filters, the length variance,
+    # the minimum coverage required, the header annotation parameters,
+    # the submission date filter parameter, the query, the amount of sequences found,
+    # the amount of sequences downloaded, and the amount of sequences filtered.
+    summaryOut.write("Date Accessed: {0}\n".format(date))
+    summaryOut.write("Organism: {0}\n".format(org))
+    summaryOut.write("\n")
+    summaryOut.write("Error Message: {0}\n".format(errorMsg))
+    summaryOut.close()
 
 def main():
 
@@ -498,6 +558,8 @@ def main():
     if args.minCov:
         minCov = args.minCov
 
+    # Grabs the current date of accession (for final summary report at the end of the analysis).
+    currentDate = dt.now().strftime("%Y/%m/%d")
 
     # We can first determine whether the provided organism has multiple segments/chromosomes
     # in its genome by querying the NCBI genome database.
@@ -506,6 +568,11 @@ def main():
     genomeSearch = Entrez.esearch(db="genome", term=genomeQuery, retmax=retmax)
     # Parse the esearch result.
     genomeRecs = Entrez.read(genomeSearch)
+
+    if len(genomeRecs['IdList']) == 0:
+        error = "No NCBI Genome entry found for organism {0}".format(args.org)
+        writeErrorSummary(args.outpref, currentDate, args.org, error)
+        sys.exit(error)
 
     # Loop over each record in the esearch output (Should only be one.)
     for id in genomeRecs["IdList"]:
@@ -516,6 +583,12 @@ def main():
 
         # Grab the number of segments from the summary data.
         numSegments = int(idData['Number_of_Chromosomes'])
+
+        if numSegments == 0:
+            error = "No number of Chromosomes/Segments listed in the Genome entry for organism {0}".format(args.org)
+            writeErrorSummary(args.outpref, currentDate, args.org, error)
+            sys.exit(error)
+
 
     # Print a message to the console letting the user know how many
     # segments were identified. 
@@ -550,9 +623,6 @@ def main():
         # If both dates were provided in the correct format, we can construct the 
         # filter string to appended to the NCBI query.
         queryDateString = " AND (\"{0}\"[PDAT]:\"{1}\"[PDAT]))".format(args.minDate, args.maxDate)
-
-    # Grabs the current date of accession (for final summary report at the end of the analysis).
-    currentDate = dt.now().strftime("%Y/%m/%d")
 
     ## Handles the minimum and maximum sequence length options.
     # Set both to 0 by default.
@@ -594,19 +664,42 @@ def main():
         # Query NCBI's nucleotide database for the organism's RefSeq genome sequence(s).
         refSeqQuery = "({0}[Orgn]) AND refseq[filter]".format(args.org)
         refSeqSearch = searchNucleotide(refSeqQuery)
+        seqTypeFound = "RefSeq"
 
         # Check whether any record IDs were returned.
         if len(refSeqSearch["IdList"]) == 0:
-            # If not, query NCBI for the organism including the phrase
-            # complete genome.
-            completeGenomeQuery = "({0}[Orgn]) AND complete genome[title]".format(args.org)
-            refSeqSearch = searchNucleotide(completeGenomeQuery)
+            # If not, the script will use different title qualifiers to return
+            # sequences which likely represent a subset of full genome sequences.
+            # The list of qualifiers is globally defined for easy modification.
+            print("No RefSeq sequences are defined for organism {0}...\n".format(args.org))
+            seqTypeFound = "Complete Genome"
+            for qual in title_search_quantifiers:
+                print("Trying sequences containing '{0}' in the title...".format(qual))
+                query = "({0}[Orgn]) AND {1}[title]".format(args.org, qual)
+                print(query)
+                refSeqSearch = searchNucleotide(query)
+
+                if len(refSeqSearch["IdList"]) != 0:
+                    break
+                else:
+                    print("No sequences found with titles matching that criteria...\n")
+
+            if len(refSeqSearch["IdList"]) == 0:
+                error = "No RefSeq or complete genome sequences found for organism {0}".format(args.org)
+                writeErrorSummary(args.outpref, currentDate, args.org, error)
+                sys.exit(error)
+
+            #print("No RefSeq exists for {0}... Searching for sequences containing 'complete genome' in the title\n".format(args.org))
+            #completeGenomeQuery = "({0}[Orgn]) AND complete genome[title]".format(args.org)
+            #refSeqSearch = searchNucleotide(completeGenomeQuery)
+
 
         # Create empty variables to store the total length of all sequences returned and 
         # the number of records. Because there could be multiple segments/chromosomes, a dictionary
         # is used to store these values. If the organism contains only a single segment/chromosome,
         # 0 will be used as the key in the dictionary.
-        totalLength = {}
+        #totalLength = {}
+        segLens = {}
         numRecords = {}
 
         # Loop from 0 to the number of IDs returned from the RefSeq query increasing by 10,000
@@ -616,7 +709,7 @@ def main():
 
             # Fetch the records from the nucleotide database.
             idHandle = Entrez.efetch(db='nucleotide', id = ",".join(refSeqSearch["IdList"]), retstart=i, retmax=retmax, rettype='gb', retmode="txt")
-
+            
             # Loop over the GenBank records returned from NCBI.
             for seqRecord in SeqIO.parse(idHandle, "genbank"):
 
@@ -641,29 +734,59 @@ def main():
                     # description.
                     segment = getRecSegment(recSource, recDesc)
 
-                    # If no segment was found in the source or description, or if the
-                    # virus was found to have only 1 segment (based on the earlier genome search), we 
-                    # set the segment to 0.
-                    if segment == None or numSegments == 1:
+                    # Checks whether multiple segments noted in the genome entry for the organism,
+                    # but the segment could not be determined for the given RefSeq.
+                    if segment == None and numSegments != 1:
+                        # If this is the case, set the segment to 0
+                        segment = 0
+
+                        ## TO BE ADDED - using named segments instead of numbers
+
+                        #print("No Segment Number Annotation found for Organism. First gene product found on segment will be used to name segment.")
+
+                        #product = getFirstGeneProduct(seqRecord)
+
+                        #if product == None:
+                        #    error = "No Segment Number or gene product annotation found to differentiate viral segments for organism {0}".format(args.org)
+                        #    writeErrorSummary(args.outpref, currentDate, args.org, error)
+                        #    sys.exit(error)
+                        #else:
+                        #    segment = product
+
+                    # If no segment was found in the RefSeq entry, but the organism
+                    # only contains 1 segment, then we can simply set the segment equal to 0.
+                    elif segment == None and numSegments == 1:
                         segment = 0
             
-                    # If no data for the current segment has been added to the
-                    # totalLength dictionary, create a new entry for it.
-                    if segment not in totalLength.keys():
-                        totalLength[segment] = 0
+                    # Checks whether the segment was found for an organism with 
+                    # a segmented genome or whether the organism only has 1 segment.
+                    if (numSegments > 1 and segment != 0) or (numSegments == 1):
+                        # If so, we can add the length of the current RefSeq to a 
+                        # dictionary to be used in calculating the average length of that organism's genome.
 
-                    # If no data for the current segment has been added to the
-                    # numRecords dictionary, create a new entry for it.
-                    if segment not in numRecords.keys():
-                        numRecords[segment] = 0
+                        # If no data for the current segment has been added to the
+                        # totalLength dictionary, create a new entry for it.
+                        if segment not in segLens.keys():
+                            segLens[segment] = []
 
-                    # Increment the number of records for the segment by 1
-                    # and add the length of this segment to the total length 
-                    numRecords[segment] += 1
-                    totalLength[segment] += seqLength
+                        # If no data for the current segment has been added to the
+                        # numRecords dictionary, create a new entry for it.
+                        if segment not in numRecords.keys():
+                            numRecords[segment] = 0
 
-        #print(json.dumps(totalLength, indent=4))
-        #print(json.dumps(numRecords, indent=4))
+                        # Increment the number of records for the segment by 1
+                        # and add the length of this segment to the total length 
+                        numRecords[segment] += 1
+                        segLens[segment].append(seqLength)
+
+
+        # One possibility for error at this point is if a RefSeq does not
+        # exist for all of the possible segments of an organism. If so,
+        # the script will exit and write an error summary file notifying hte user.
+        if len(segLens.keys()) != numSegments:
+            error = "ERROR: Number of segments returned from RefSeq does not match number reported in genome entry for organism {0}".format(args.org)
+            writeErrorSummary(args.outpref, currentDate, args.org, error)
+            sys.exit(error)
 
         # Create an empty dictionary to store the average lengths for
         # each segment/chromosome (again, if organism only has 1 segment/chromosome
@@ -679,41 +802,70 @@ def main():
         # the values will be the same (as we only need to capture this one segment)
         minAvg = 0
         maxAvg = 0
+
+        # Calculating the length range for the Nucleotide query
+        # is handled differently depending on whether the organism contains more than 1 
+        # segment or not.
+        if len(segLens.keys()) > 1:
+            # If the organism contains multiple segments, then the minimum genome length
+            # should be calculated by taking the average length of the smallest segment
+            # minus the length variance. The maximum genome length should be calculated as
+            # by taking the average length of the largest segment plus the length variance.
+            
+            # Loop over each segment in the total length dictionary.
+            for seg in sorted(segLens.keys()):
+
+                # If no data for the current segment has been added to the avgLengths
+                # dictionary, create a new entry for it.
+                if seg not in avgLengths.keys():
+                    avgLengths[seg] = 0
         
-        # Loop over each segment in the total length dictionary.
-        for seg in totalLength.keys():
+                # Calculate the average length by dividing the total length
+                # by the number of records for the current segment.
+                avgLengths[seg] = sum(segLens[seg]) / numRecords[seg]
 
-            # If no data for the current segment has been added to the avgLengths
-            # dictionary, create a new entry for it.
-            if seg not in avgLengths.keys():
-                avgLengths[seg] = 0
+                # If the minimum average has not been set yet (is equal to 0) or
+                # the average length is less than the current minimum. Set
+                # the minimum average to the current average length
+                if minAvg == 0 or avgLengths[seg] < minAvg:
+                    minAvg = avgLengths[seg]
+
+                # If the maximum average has not been set yet (is equal to 0) or
+                # the average length is greater than the current maximum. Set
+                # the maximum average to the current average length
+                if maxAvg == 0 or avgLengths[seg] > maxAvg:
+                    maxAvg = avgLengths[seg]
+
+                print("Segment {0}: {1} {2} Sequences\nAverage Length {3} bp".format(seg, numRecords[seg], seqTypeFound, avgLengths[seg]))
         
-            # Calculate the average length by dividing the total length
-            # by the number of records for the current segment.
-            avgLengths[seg] = totalLength[seg] / numRecords[seg]
+        else:
+            # If the organism only contains 1 segment in the genome,
+            # then the length range will be the smallest and largest RefSeq lengths 
+            # +/- the length variance factor.
 
-            # If the minimum average has not been set yet (is equal to 0) or
-            # the average length is less than the current minimum. Set
-            # the minimum average to the current average length
-            if minAvg == 0 or avgLengths[seg] < minAvg:
-                minAvg = avgLengths[seg]
+            # Grab only segment key from the dictionary (this is
+            # added for the future in case any formal segment/gene names will be used)
+            seg = list(segLens.keys())[0]
 
-            # If the maximum average has not been set yet (is equal to 0) or
-            # the average length is greater than the current maximum. Set
-            # the maximum average to the current average length
-            if maxAvg == 0 or avgLengths[seg] > maxAvg:
-                maxAvg = avgLengths[seg]
+            # Grab the minimum and maximum RefSeq genome lengths for
+            # the organism from the dictionary.
+            minAvg = min(segLens[seg])
+            maxAvg = max(segLens[seg])
+
+            print("{0} {1} Sequences\nLargest Sequence: {2} bp\nSmallest Sequence: {3} bp".format(numRecords[seg], seqTypeFound, maxAvg, minAvg))
+            
+
 
             # Print the number of RefSeq Sequences and average length to the console
             # for the user.
-            if seg != 0:
+            #if seg != 0:
                 # If the segment does not equal 0 (the organism has segments/chromosomes), our message will
                 # reflect this by also printing the segment
-                print("Segment {0}: {1} RefSeq Sequences\nAverage Length {2}".format(seg, numRecords[seg], avgLengths[seg]))
-            else:
+            #    print("Segment {0}: {1} RefSeq Sequences\nAverage Length {2}".format(seg, numRecords[seg], avgLengths[seg]))
+            #else:
                 # If the segment is 0, then it means this organism does not have any segments/chromosomes,
                 # and we only need to print the number of sequences and average length.
-                print("{0} RefSeq Sequences\nAverage Length {1}".format(numRecords[seg], avgLengths[seg]))
+            #    print("{0} RefSeq Sequences\nAverage Length {1}".format(numRecords[seg], avgLengths[seg]))
     
         # Print a blank line to separate text in the console.
         print("")
@@ -725,7 +877,6 @@ def main():
         # Calculates the maximum length of query by adjusting the maximum
         # average by the length variance factor.  
         maxLen = maxAvg + (maxAvg * lenVar)
-
 
     # Create the search term containing the organism, length range, and date filter (will be blank unless
     # supplied by the user).
@@ -745,9 +896,14 @@ def main():
     idsFound = searchResults['IdList']
     total_seqs = len(idsFound)
 
+    # Query the ids returned from teh initial esearch using the
+    # EPOST function.
+    ePostHandle = Entrez.epost("nucleotide", id = ",".join(idsFound))
+    ePostResult = Entrez.read(ePostHandle)
+
     # Grab the WebEnv and Query key for the history feature (optimization for large queries)
-    webEnv = searchResults["WebEnv"]
-    query_key = searchResults["QueryKey"]
+    webEnv = ePostResult["WebEnv"]#searchResults["WebEnv"]
+    query_key = ePostResult["QueryKey"]#searchResults["QueryKey"]
 
     # Print a message letting the user know how many records were found
     print("Query returned {0} Sequences\n\n".format(total_seqs))
@@ -756,12 +912,11 @@ def main():
     if numSegments > 1 and (not args.minLen and not args.maxLen):
         # If there are multiple segments and the user did not supply a set length range, we will perform
         # filtering based on the accession length, coverage percentage, and length of the segment.
-        print("Filtering any 'patent' sequence by accession prefix, sequences with less than {0}% coverage, or segment length outside the segment specifc range\n".format(str(minCov * 100)))
+        print("Filtering any 'patent' sequence by accession prefix, sequences with less than {0}% coverage, or segment length outside the segment specific range\n".format(str(minCov * 100)))
     else:
         # Otherwise, we will simply filter based on accession length and coverage percentage
         print("Filtering any 'patent' sequence by accession prefix or sequences with less than {0}% coverage\n".format(str(minCov * 100)))
 
-    #seqOut = open("{0}-sequences.fasta".format(args.outpref), "w+")
     # Create an empty dictionary to contain output streams for each segment. If
     # the user supplied the --separateSegment option and the genome has multiple
     # segments/chromosomes, this will be used. If not, then a single output stream will
@@ -800,7 +955,12 @@ def main():
     # optimize the script by limiting the number of times we ping NCBI.
     for i in range(0, len(idsFound), 9999):
 
-        idHandle = Entrez.efetch(db='nucleotide', id = ",".join(idsFound), retstart=i, retmax=retmax, rettype='gb', retmode="txt", webenv=webEnv, query_key=query_key)
+        # Subset the list of Ids to pull using the current iterator
+        idsToGrab = idsFound[i:i+10000]
+
+        # Use NCBI's efetch function with the ePOST webenv/query key to 
+        # Grab the Genbank records for these Ids
+        idHandle = Entrez.efetch(db='nucleotide', id = ",".join(idsToGrab), retmax=10000, rettype='gb', retmode="txt", webenv=webEnv, query_key=query_key)
 
         # Parse the returned handle into SeqRecords
         seqRecords = SeqIO.parse(idHandle, "genbank")
@@ -816,12 +976,11 @@ def main():
             # Loop over each ID in the list list retrieved.
             for seqRecord in seqRecords:
                 count += 1
-                print(count)
 
                 # Grab the accession number and description
                 # from the record
                 accession = seqRecord.id
-                print(accession)
+                print("Processing Record: {0}, Number {1} of {2}, Sequence Defined = {3}".format(accession, count, len(idsFound), seqRecord.seq.defined))
                 desc = seqRecord.description
 
                 # Get the source feature from the record.
@@ -836,6 +995,8 @@ def main():
 
                 # Grab the length of the the sequence.
                 recLen = len(seqRecord.seq)
+                if seqRecord.seq.defined == False:
+                    recLen = "Sequence Undefined in NCBI"
 
                 # Create an empty list to store the metadata to be written for each sequence
                 outMetadata = []
@@ -851,6 +1012,9 @@ def main():
                     
                     # Grab the segment for the record.
                     recSeg = getRecSegment(recSource, desc)
+
+                    #if recSeg == None:
+                    #    recSeg = getFirstGeneProduct(seqRecord)
 
                     # Create an empty variable to store the name of the output
                     # filestream (used for if the user specified to separate
@@ -899,7 +1063,7 @@ def main():
                     # option, modify the sequence header to include the taxID, segment, and 
                     # accession number.
                     if args.annotHeader and seqPass == True:
-                                seqRecord.id = "{0}|{1}|{2}".format(taxID, "segment " + recSeg, accession)
+                                seqRecord.id = "{0}|{1}|{2}".format(taxID, accession, "segment_" + recSeg)
                 else:
 
                     # If a single segment/chromosome, no segment/chromosome
@@ -928,7 +1092,7 @@ def main():
                         # the sequence header to include the taxID, "complete genome", and
                         # accession number.
                         if args.annotHeader:
-                            seqRecord.id = "{0}|{1}|{2}".format(taxID, "complete genome", accession)
+                            seqRecord.id = "{0}|{1}|{2}".format(taxID, accession, "complete_genome")
                 
                 # Check whether the sequence passed filtering
                 if seqPass:
